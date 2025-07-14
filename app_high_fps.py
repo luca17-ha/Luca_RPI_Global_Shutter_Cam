@@ -1,55 +1,34 @@
 import time
 import threading
-
 from flask import Flask, Response
 from picamera2 import Picamera2
 import cv2
+from GSCrop import set_camera_crop
 
+# ---------- Kamera-Cropping festlegen ----------
+CROP_WIDTH = 400
+CROP_HEIGHT = 400
+set_camera_crop(CROP_WIDTH, CROP_HEIGHT)
 
-"""
-Falls Kamera Cropping konfiguration nach dem Ausführen von high_fps files nucht mher richitg ist
-(RuntimeError: Failed to start camera: Invalid argument)
-
-media-ctl -d /dev/media0 \
-  --set-v4l2 "'imx296 10-001a':0 [fmt:SBGGR10_1X10/1456x1088 crop:(0,0)/1456x1088]"
-
-"""
-
+# ---------- Flask App vorbereiten ----------
 app = Flask(__name__)
-
-# Initialize the camera
 picam2 = Picamera2()
-picam2.configure(picam2.create_video_configuration(main={"size": (640, 480)}))
-# picam2.configure(picam2.create_video_configuration(main={"size": (128, 128)}))
-# picam2.configure(picam2.create_video_configuration(main={"size": (1440, 1080)}))
 
+# Kamera konfigurieren (keine Rohdaten, nur das verarbeitete Bild vom ISP)
+video_config = picam2.create_video_configuration(
+    main={"size": (CROP_WIDTH, CROP_HEIGHT)},
+    raw=None,
+    controls={
+        "NoiseReductionMode": 0,  # deaktiviert Noise Reduction
+        "FrameDurationLimits": (2000, 2000),  # 500 fps theoretisch
+    }
+)
+picam2.configure(video_config)
 
-
-
-# picam2.set_controls({
-#     "ExposureTime": 5000,
-#     "AnalogueGain": 10.0,
-#     "NoiseReductionMode": 0  # Turn off noise reduction
-# })
-
-# Set controls automatically
-picam2.set_controls({})
-
-# Force noise rexution off (should increase performance)
-picam2.set_controls({
-    "NoiseReductionMode": 0  # Turn off noise reduction
-})
-
-# picam2.set_controls({
-#     "FrameDurationLimits": (55, 65),  # Targeting 500 fps (if supported)
-# })
-picam2.set_controls({
-    "FrameDurationLimits": (2000, 2000),  # Targeting 500 fps (if supported)
-})
-
+# Kamera starten
 picam2.start()
 
-# Global variable to store FPS
+# ---------- FPS-Zählung ----------
 fps = 0.0
 fps_lock = threading.Lock()
 
@@ -59,10 +38,9 @@ def gen_frames():
     start_time = time.time()
     while True:
         frame = picam2.capture_array()
-        # Convert from RGB to BGR for OpenCV
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)  # ISP liefert RGBA
 
-        # Calculate FPS
+        # FPS berechnen
         frame_counter += 1
         elapsed_time = time.time() - start_time
         if elapsed_time >= 1.0:
@@ -71,9 +49,9 @@ def gen_frames():
             frame_counter = 0
             start_time = time.time()
 
+        # MJPEG-Stream generieren
         ret, buffer = cv2.imencode('.jpg', frame)
         frame = buffer.tobytes()
-
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
@@ -82,13 +60,11 @@ def video_feed():
     return Response(gen_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# New route to provide FPS value
 @app.route('/fps')
 def get_fps():
     with fps_lock:
         current_fps = fps
     return f"{current_fps:.2f}"
-
 
 @app.route('/')
 def index():
@@ -103,7 +79,7 @@ def index():
         </head>
         <body>
             <h1>Live Stream</h1>
-            <img src="/video_feed">
+            <img src="/video_feed" width="1000">
             <div id="fps">FPS: Calculating...</div>
             <script>
                 function fetchFPS() {
@@ -114,10 +90,7 @@ def index():
                         })
                         .catch(error => console.error('Error fetching FPS:', error));
                 }
-                // Fetch FPS every second
                 setInterval(fetchFPS, 1000);
-         
-                // Fetch FPS on page load
                 fetchFPS();
             </script>
         </body>
